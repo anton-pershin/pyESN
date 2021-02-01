@@ -28,8 +28,7 @@ def identity(x):
     return x
 
 
-class ESN():
-
+class ESN:
     def __init__(self, n_inputs, n_outputs, n_reservoir=200,
                  spectral_radius=0.95, sparsity=0, noise=0.001, input_shift=None,
                  input_scaling=None, teacher_forcing=True, feedback_scaling=None,
@@ -216,6 +215,42 @@ class ESN():
             print(np.sqrt(np.mean((pred_train - outputs)**2)))
         return pred_train
 
+    def synchronize(self, inputs, outputs):
+        """
+        Synchronize the reservoir state with given inputs and outputs.
+
+        Args:
+            inputs: array of dimensions (N_training_samples x n_inputs)
+            outputs: array of dimension (N_training_samples x n_outputs)
+
+        Returns:
+            Array of output activations
+        """
+
+        if inputs.ndim < 2:
+            inputs = np.reshape(inputs, (len(inputs), -1))
+        if outputs.ndim < 2:
+            outputs = np.reshape(outputs, (len(outputs), -1))
+        n_samples = inputs.shape[0]
+
+        inputs_scaled = self._scale_inputs(inputs)
+        teachers_scaled = self._scale_teacher(outputs)
+        states = np.zeros((n_samples, self.n_reservoir))
+#        outputs = np.vstack(
+#            [lastoutput, np.zeros((n_samples, self.n_outputs))])
+
+#        inputs = np.vstack([self.lastinput, self._scale_inputs(inputs)])
+
+        for n in range(1, n_samples):
+            states[n, :] = self._update(states[n - 1, :], inputs[n, :], outputs[n - 1, :])
+            esn_output = self.out_activation(np.dot(self.W_out, np.concatenate([states[n, :], inputs[n, :]])))
+
+        self.laststate = states[-1, :]
+        self.lastinput = inputs_scaled[-1, :]
+        self.lastoutput = teachers_scaled[-1, :]
+
+        return self._unscale_teacher(self.out_activation(outputs[1:]))
+
     def predict(self, inputs, continuation=True):
         """
         Apply the learned weights to the network's reactions to new input.
@@ -253,3 +288,35 @@ class ESN():
                                                            np.concatenate([states[n + 1, :], inputs[n + 1, :]])))
 
         return self._unscale_teacher(self.out_activation(outputs[1:]))
+
+
+def optimal_esn(training_timeseries, test_timeseries_set, spectral_radius_values, sparsity_values, n_reservoir):
+    trial_number = 10
+    best_esn = None
+    best_error = np.inf
+
+    for spectral_radius in spectral_radius_values:
+        print(f'Spectral radius = {spectral_radius}')
+        for sparsity in sparsity_values:
+            print(f'\tSparsity = {sparsity}')
+            for i in range(1, trial_number + 1):
+                print(f'\t\tTrial #{i}')
+                esn = ESN(n_inputs=1,
+                          n_outputs=training_timeseries.shape[1],
+                          n_reservoir=n_reservoir,
+                          spectral_radius=spectral_radius,
+                          sparsity=sparsity,
+                          random_state=i)
+                esn.fit(np.ones(training_timeseries.shape[0]), training_timeseries)
+                error = 0
+                for test_timeseries in test_timeseries_set:
+                    synclen = 10
+                    predlen = test_timeseries.shape[0] - synclen
+                    esn.synchronize(np.ones(synclen), test_timeseries[:synclen])
+                    prediction = esn.predict(np.ones(predlen))
+                    error += np.sqrt(np.mean((prediction - test_timeseries[synclen:])**2))
+                if error < best_error:
+                    print(f'\t\t\tNew best ESN. Error = {error}, spectral radius = {spectral_radius}, sparsity = {sparsity}')
+                    best_error = error
+                    best_esn = esn
+    return best_esn
